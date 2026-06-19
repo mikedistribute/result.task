@@ -21,6 +21,7 @@ type MemeConcept = {
   foregroundQuery: string;
   backgroundQuery: string;
   audioMood: "dramatic" | "chill" | "victory" | "awkward" | "chaotic";
+  score?: number;
 };
 
 type ClipAsset = {
@@ -49,7 +50,7 @@ export const processJob = internalAction({
       });
 
       const extractedUrl = extractUrl(job.prompt);
-      const siteText = extractedUrl ? await scrapeSite(extractedUrl) : "";
+      const siteText = extractedUrl ? await researchProductSite(extractedUrl) : "";
 
       await ctx.runMutation(internal.chat.updatePipelineState, {
         jobId: args.jobId,
@@ -110,6 +111,14 @@ export const processJob = internalAction({
   },
 });
 
+async function researchProductSite(url: string) {
+  const firecrawlText = await scrapeSite(url);
+  if (firecrawlText) {
+    return firecrawlText;
+  }
+  return await fetchReadableHtml(url);
+}
+
 async function scrapeSite(url: string) {
   const firecrawlApiKey = process.env.FIRECRAWL_API_KEY;
   if (!firecrawlApiKey) {
@@ -142,6 +151,27 @@ async function scrapeSite(url: string) {
     .slice(0, 12000);
 }
 
+async function fetchReadableHtml(url: string) {
+  try {
+    const response = await fetch(url, {
+      headers: { "User-Agent": "result-dev-ugc-agent" },
+    });
+    if (!response.ok) {
+      return "";
+    }
+    const html = await response.text();
+    return html
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 12000);
+  } catch {
+    return "";
+  }
+}
+
 async function planVideo(prompt: string, siteText: string) {
   const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
   if (!anthropicApiKey) {
@@ -158,12 +188,21 @@ async function planVideo(prompt: string, siteText: string) {
     },
     body: JSON.stringify({
       model: "claude-3-5-sonnet-latest",
-      max_tokens: 1800,
-      temperature: 0.8,
+      max_tokens: 2600,
+      temperature: 0.9,
+      system: buildCreativeDirectorSystemPrompt(),
       messages: [
         {
           role: "user",
-          content: `You are a UGC meme producer. Return ONLY valid JSON with this shape:
+          content: `Create the best UGC-style short video plan for this chat request.
+
+User message:
+${prompt}
+
+Researched product context from crawler/search:
+${siteText || "No crawled content was available. Infer cautiously from the user message, but still produce a usable plan."}
+
+Return ONLY valid JSON with this exact shape:
 {
   "profile": {
     "companyName": string,
@@ -181,19 +220,11 @@ async function planVideo(prompt: string, siteText: string) {
       "jokeAngle": string,
       "foregroundQuery": string,
       "backgroundQuery": string,
-      "audioMood": "dramatic" | "chill" | "victory" | "awkward" | "chaotic"
+      "audioMood": "dramatic" | "chill" | "victory" | "awkward" | "chaotic",
+      "score": number
     }
   ]
-}
-
-Make 5 concepts. Captions should feel like short-form social captions, not ads.
-Prioritize reaction clips from KLIPY/Vlipsy, so foregroundQuery should be simple pop-culture/reaction terms such as "confused thinking", "dramatic stare", "celebration", "awkward silence".
-
-User prompt:
-${prompt}
-
-Website notes:
-${siteText}`,
+}`,
         },
       ],
     }),
@@ -219,8 +250,55 @@ ${siteText}`,
 
   return {
     profile: parsed.profile,
-    concepts: parsed.concepts.slice(0, 5),
+    concepts: parsed.concepts
+      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+      .slice(0, 5),
   };
+}
+
+function buildCreativeDirectorSystemPrompt() {
+  return `You are the creative director and asset-search planner for a tiny web app that assembles UGC-style meme videos.
+
+The assignment:
+- A user sends a product description and usually a URL.
+- The app researches the URL and product context.
+- The app must assemble a 5-10 second UGC-style video from existing assets.
+- The video has four layers: background video/photo, trendy text overlay, trending audio, and a foreground GIF/video clip on top.
+- The app must be AI-organized, not AI-generated. Do not propose generated footage, background removal, avatars, or synthetic scenes.
+
+Your job:
+1. Understand the product from the user message AND crawled site content.
+2. Find the specific emotional/comedic tension behind the product.
+3. Write social-native captions that feel like memes people actually post.
+4. Produce asset-search queries for KLIPY/Vlipsy-style short clips.
+5. Rank the concepts and put the strongest one first.
+
+Critical behavior:
+- ALWAYS ground the joke in the researched product context when available: category, user pain, promised shortcut, buyer/user identity, and funny before/after contrast.
+- If crawler content exists, use it. Do not ignore the site and do not make generic "productivity app" jokes.
+- Prefer concrete product language over vague benefits. For a calorie app, use calories, macros, food logging, meal tracking, gym, cut/bulk, protein, etc.
+- The output should sell the product indirectly through the joke. It must not read like an ad.
+- The foreground clip is the most important layer. The foregroundQuery must be broad enough to find real reaction clips but specific enough to match the joke.
+- Good foreground queries are short: "confused guy thinking", "dramatic stare", "celebrity confused", "man celebrating", "awkward silence", "shocked reaction", "guy pretending confident".
+- Do not include brand names in foregroundQuery unless the brand itself is a common searchable meme/person.
+- BackgroundQuery should be a vibe/place/situation that reinforces the product: "gym locker room", "kitchen meal prep", "office desk", "modern bedroom", "restaurant table", "phone scrolling".
+- Captions should be lowercase or casual sentence case, 1-3 short lines, readable at the top of a vertical video.
+- Avoid hashtags, emoji, corporate words, long explanations, and claims that need legal substantiation.
+- Do not mention APIs, Firecrawl, Claude, KLIPY, Vlipsy, Convex, or implementation details.
+- Output only valid JSON. No markdown, no commentary.
+
+Concept scoring:
+- score 90-100: product-specific, instantly understandable, funny, clip-searchable, and likely to work in 5-10 seconds.
+- score 70-89: good but less sharp or less product-specific.
+- score below 70: avoid unless no better option.
+
+For every concept:
+- caption: the actual overlay text.
+- jokeAngle: why this is funny and how it connects to the product.
+- foregroundQuery: search query for the top reaction/GIF/video layer.
+- backgroundQuery: search query for the background layer.
+- audioMood: the kind of audio if foreground audio is absent.
+- score: your ranking score.`;
 }
 
 async function findForegroundClip(query: string): Promise<ClipAsset> {
