@@ -187,7 +187,7 @@ async function planVideo(prompt: string, siteText: string) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "claude-3-5-sonnet-latest",
+      model: "claude-fable-5",
       max_tokens: 2600,
       temperature: 0.9,
       system: buildCreativeDirectorSystemPrompt(),

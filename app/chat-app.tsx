@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { ArrowUp, Loader2 } from "lucide-react";
 
@@ -17,14 +17,14 @@ const starter =
 export function ChatApp() {
   const [input, setInput] = useState(starter);
   const [activeJobId, setActiveJobId] = useState<Id<"jobs"> | null>(null);
-  const sessionId = useMemo(() => {
+  const [sessionId, setSessionId] = useState(() => {
     if (typeof window === "undefined") return "server";
     const existing = window.localStorage.getItem("result-session-id");
     if (existing) return existing;
     const created = crypto.randomUUID();
     window.localStorage.setItem("result-session-id", created);
     return created;
-  }, []);
+  });
 
   const messages = useQuery(api.chat.listMessages, { sessionId });
   const latestMessageJobId = messages
@@ -46,14 +46,27 @@ export function ChatApp() {
     setActiveJobId(result.jobId);
   }
 
+  function startNewSession() {
+    const nextSessionId = crypto.randomUUID();
+    window.localStorage.setItem("result-session-id", nextSessionId);
+    setSessionId(nextSessionId);
+    setActiveJobId(null);
+    setInput(starter);
+  }
+
   return (
     <main className="min-h-svh bg-white text-black">
       <div className="mx-auto flex min-h-svh w-full max-w-3xl flex-col px-4">
         <header className="flex h-14 shrink-0 items-center justify-between border-b border-black">
           <div className="text-sm font-semibold">result.dev</div>
-          <div className="text-xs uppercase tracking-[0.16em] text-black/45">
-            UGC chat
-          </div>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={startNewSession}
+            className="h-8 rounded-none border-black bg-white px-3 text-xs uppercase tracking-[0.16em] text-black hover:bg-black hover:text-white"
+          >
+            New session
+          </Button>
         </header>
 
         <section className="flex min-h-0 flex-1 flex-col">
@@ -100,7 +113,10 @@ export function ChatApp() {
             activeJob.renderPlan && (
               <div className="border-t border-black py-3">
                 <div className="flex items-center gap-3 text-xs uppercase tracking-[0.14em] text-black/55">
-                  <VideoRenderer jobId={activeJob._id} plan={activeJob.renderPlan} />
+                  <VideoRenderer
+                    jobId={activeJob._id}
+                    plan={activeJob.renderPlan}
+                  />
                   Rendering
                 </div>
               </div>
