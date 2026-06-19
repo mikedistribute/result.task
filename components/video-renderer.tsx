@@ -101,14 +101,27 @@ async function renderPlanToWebm(
 
   const background = await loadVideo(plan.background.url);
   const foreground = await loadVideo(plan.foreground.url);
+  const shouldUseForegroundAudio = plan.audio?.useForegroundAudio ?? true;
   background.muted = true;
   background.loop = true;
-  foreground.muted = !(plan.audio?.useForegroundAudio ?? true);
+  foreground.muted = !shouldUseForegroundAudio;
   foreground.loop = true;
 
-  await Promise.all([playMedia(background), playMedia(foreground)]);
+  await Promise.all([
+    playMedia(background),
+    playMedia(foreground).catch(async () => {
+      foreground.muted = true;
+      await playMedia(foreground);
+    }),
+  ]);
 
   const stream = canvas.captureStream(30);
+  if (shouldUseForegroundAudio) {
+    const audioStream = captureElementStream(foreground);
+    for (const track of audioStream?.getAudioTracks() ?? []) {
+      stream.addTrack(track);
+    }
+  }
   const chunks: BlobPart[] = [];
   const mimeType = pickMimeType();
   const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
@@ -132,19 +145,18 @@ async function renderPlanToWebm(
   draw();
 
   await new Promise<void>((resolve) => {
+    recorder.onstop = () => resolve();
     window.setTimeout(() => {
       cancelAnimationFrame(frameId);
       recorder.stop();
-      resolve();
     }, durationMs + 200);
-  });
-
-  await new Promise<void>((resolve) => {
-    recorder.onstop = () => resolve();
   });
 
   background.pause();
   foreground.pause();
+  for (const track of stream.getTracks()) {
+    track.stop();
+  }
 
   return new Blob(chunks, { type: mimeType || "video/webm" });
 }
@@ -265,6 +277,14 @@ async function loadVideo(src: string) {
 async function playMedia(video: HTMLVideoElement) {
   video.currentTime = 0;
   await video.play();
+}
+
+function captureElementStream(video: HTMLVideoElement): MediaStream | null {
+  const element = video as HTMLVideoElement & {
+    captureStream?: () => MediaStream;
+    mozCaptureStream?: () => MediaStream;
+  };
+  return element.captureStream?.() ?? element.mozCaptureStream?.() ?? null;
 }
 
 function pickMimeType() {
