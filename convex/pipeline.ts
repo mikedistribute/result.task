@@ -240,10 +240,7 @@ async function findBackgroundClip(query: string): Promise<ClipAsset> {
 }
 
 async function searchKlipy(query: string): Promise<ClipAsset | null> {
-  const endpoint =
-    process.env.KLIPY_CLIPS_ENDPOINT ??
-    `${process.env.KLIPY_BASE_URL ?? "https://api.klipy.com/api/v1"}/clips/search`;
-
+  const endpoint = resolveKlipyEndpoint();
   const url = new URL(endpoint);
   url.searchParams.set("q", query);
   url.searchParams.set("query", query);
@@ -274,6 +271,28 @@ async function searchKlipy(query: string): Promise<ClipAsset | null> {
   } catch {
     return null;
   }
+}
+
+function resolveKlipyEndpoint() {
+  const apiKey = process.env.KLIPY_API_KEY ?? "";
+  const configured = process.env.KLIPY_CLIPS_ENDPOINT;
+  const baseUrl = process.env.KLIPY_BASE_URL ?? "https://api.klipy.com";
+  const rawEndpoint = configured
+    ? extractUrlFromMaybeCurl(configured)
+    : `${baseUrl}/api/v1/${apiKey}/clips/trending?page=1&per_page=10&customer_id=result-dev&locale=en&content_filter=high`;
+
+  return rawEndpoint
+    .replaceAll("{app_key}", apiKey)
+    .replaceAll("{page}", "1")
+    .replaceAll("{per_page}", "10")
+    .replaceAll("{customer_id}", "result-dev")
+    .replaceAll("{locale}", "en")
+    .replaceAll("{content_filter}", "high");
+}
+
+function extractUrlFromMaybeCurl(value: string) {
+  const match = value.match(/https:\/\/[^'"\s]+/);
+  return match?.[0] ?? value;
 }
 
 async function searchVlipsy(query: string): Promise<ClipAsset | null> {
