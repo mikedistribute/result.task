@@ -26,7 +26,7 @@ type MemeConcept = {
 }
 
 type ClipAsset = {
-  source: "klipy" | "vlipsy" | "fallback"
+  source: "klipy" | "pexels" | "vlipsy" | "fallback"
   title: string
   url: string
   alternateUrls?: string[]
@@ -86,7 +86,7 @@ export const processJob = internalAction({
       await ctx.runMutation(internal.chat.updatePipelineState, {
         jobId: args.jobId,
         status: "planning",
-        content: "Writing meme concepts and searching KLIPY/Vlipsy clips...",
+        content: "Writing meme concepts and searching KLIPY/Pexels assets...",
       })
 
       const { profile, concepts } = await planVideo(job.prompt, siteText, log)
@@ -522,11 +522,10 @@ async function findForegroundClip(
   log: PipelineLogger,
   usedUrls: Set<string>
 ): Promise<ClipAsset> {
-  await log("asset_search", "Searching foreground reaction clip", { query })
-  const clip =
-    (await searchVlipsy(query, log, usedUrls)) ??
-    (await searchKlipy(query, log, usedUrls)) ??
-    fallbackClip(query)
+  await log("asset_search", "Searching KLIPY foreground reaction clip", {
+    query,
+  })
+  const clip = (await searchKlipy(query, log, usedUrls)) ?? fallbackClip(query)
   await log("asset_search", "Foreground clip selected", {
     query,
     source: clip.source,
@@ -542,16 +541,11 @@ async function findBackgroundClip(
   log: PipelineLogger,
   usedUrls: Set<string>
 ): Promise<ClipAsset> {
-  const backgroundQuery = `${query} background`
-  await log("asset_search", "Searching background clip", {
-    query: backgroundQuery,
-  })
+  await log("asset_search", "Searching Pexels background video", { query })
   const clip =
-    (await searchVlipsy(backgroundQuery, log, usedUrls)) ??
-    (await searchKlipy(backgroundQuery, log, usedUrls)) ??
-    fallbackClip(query)
+    (await searchPexelsBackground(query, log, usedUrls)) ?? fallbackClip(query)
   await log("asset_search", "Background clip selected", {
-    query: backgroundQuery,
+    query,
     source: clip.source,
     title: clip.title,
     url: clip.url,
@@ -565,54 +559,156 @@ async function searchKlipy(
   log: PipelineLogger,
   usedUrls: Set<string>
 ): Promise<ClipAsset | null> {
-  const endpoint = resolveKlipyEndpoint()
-  const url = new URL(endpoint)
-  url.searchParams.set("q", query)
-  url.searchParams.set("query", query)
-  url.searchParams.set("limit", "10")
-
   const headers: Record<string, string> = {}
   if (process.env.KLIPY_API_KEY) {
     headers.Authorization = `Bearer ${process.env.KLIPY_API_KEY}`
     headers["x-api-key"] = process.env.KLIPY_API_KEY
   }
 
-  try {
+  if (!process.env.KLIPY_API_KEY) {
+    await log("klipy", "Missing KLIPY_API_KEY; skipping KLIPY search", {
+      query,
+    })
+    return null
+  }
+
+  const urls = resolveKlipySearchUrls(query)
+  for (const url of urls) {
     await log("klipy", "Calling KLIPY clips endpoint", {
       query,
       endpoint: redactUrl(url.toString()),
       hasApiKey: Boolean(process.env.KLIPY_API_KEY),
     })
-    const response = await fetch(url, { headers })
-    await log("klipy", "KLIPY response received", {
+
+    try {
+      const response = await fetch(url, { headers })
+      await log("klipy", "KLIPY response received", {
+        query,
+        endpoint: redactUrl(url.toString()),
+        ok: response.ok,
+        status: response.status,
+        statusText: response.statusText,
+      })
+      if (!response.ok) {
+        await log("klipy", "KLIPY request failed; trying next search shape", {
+          query,
+          endpoint: redactUrl(url.toString()),
+          bodyPreview: (await response.text()).slice(0, 800),
+        })
+        continue
+      }
+
+      const json = await response.json()
+      const candidates = collectVideoCandidates(json, query)
+        .filter((candidate) => !usedUrls.has(candidate.url))
+        .sort((a, b) => b.relevanceScore - a.relevanceScore)
+      const asset = candidates[0] ?? null
+      await log(
+        "klipy",
+        asset ? "KLIPY search asset found" : "KLIPY search returned no asset",
+        {
+          query,
+          endpoint: redactUrl(url.toString()),
+          candidateCount: candidates.length,
+          asset: asset
+            ? {
+                title: asset.title ?? null,
+                url: asset.url,
+                previewUrl: asset.previewUrl ?? null,
+                relevanceScore: asset.relevanceScore,
+              }
+            : null,
+          topCandidates: candidates.slice(0, 5).map((candidate) => ({
+            title: candidate.title ?? null,
+            url: candidate.url,
+            relevanceScore: candidate.relevanceScore,
+            metadataPreview: candidate.metadataText.slice(0, 180),
+          })),
+        }
+      )
+      if (!asset) continue
+
+      const alternateUrls = candidates
+        .map((candidate) => candidate.url)
+        .filter((url) => url !== asset.url)
+      return {
+        source: "klipy",
+        title: asset.title ?? query,
+        url: asset.url,
+        alternateUrls,
+        previewUrl: asset.previewUrl,
+        hasAudio: true,
+        relevanceScore: asset.relevanceScore,
+      }
+    } catch (error) {
+      await log("klipy", "KLIPY search threw; trying next search shape", {
+        query,
+        endpoint: redactUrl(url.toString()),
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  return null
+}
+
+async function searchPexelsBackground(
+  query: string,
+  log: PipelineLogger,
+  usedUrls: Set<string>
+): Promise<ClipAsset | null> {
+  const apiKey = process.env.PEXELS_API_KEY
+  if (!apiKey) {
+    await log("pexels", "Missing PEXELS_API_KEY; skipping Pexels background", {
+      query,
+    })
+    return null
+  }
+
+  const url = new URL("https://api.pexels.com/v1/videos/search")
+  url.searchParams.set("query", query)
+  url.searchParams.set("orientation", "portrait")
+  url.searchParams.set("size", "medium")
+  url.searchParams.set("per_page", "12")
+  url.searchParams.set("page", "1")
+
+  try {
+    await log("pexels", "Calling Pexels video search", {
+      query,
+      endpoint: redactUrl(url.toString()),
+    })
+    const response = await fetch(url, {
+      headers: { Authorization: apiKey },
+    })
+    await log("pexels", "Pexels response received", {
       query,
       ok: response.ok,
       status: response.status,
       statusText: response.statusText,
+      remaining: response.headers.get("x-ratelimit-remaining"),
     })
     if (!response.ok) {
-      await log("klipy", "KLIPY request failed", {
+      await log("pexels", "Pexels request failed", {
         query,
         bodyPreview: (await response.text()).slice(0, 800),
       })
       return null
     }
-    const json = await response.json()
-    const candidates = collectVideoCandidates(json, query)
+
+    const json = (await response.json()) as {
+      videos?: Array<Record<string, unknown>>
+    }
+    const candidates = collectPexelsVideoCandidates(json, query)
       .filter((candidate) => !usedUrls.has(candidate.url))
       .sort((a, b) => b.relevanceScore - a.relevanceScore)
     const asset = candidates[0] ?? null
-    const isTrendingEndpoint = url.pathname.includes("/trending")
-    const shouldRejectAsIrrelevant =
-      isTrendingEndpoint && (!asset || asset.relevanceScore <= 0)
     await log(
-      "klipy",
-      asset && !shouldRejectAsIrrelevant
-        ? "KLIPY asset found"
-        : "KLIPY returned no query-relevant video asset",
+      "pexels",
+      asset
+        ? "Pexels background asset found"
+        : "Pexels returned no video asset",
       {
         query,
-        endpointType: isTrendingEndpoint ? "trending" : "search",
         candidateCount: candidates.length,
         asset: asset
           ? {
@@ -630,25 +726,22 @@ async function searchKlipy(
         })),
       }
     )
-    if (!asset || shouldRejectAsIrrelevant) {
-      return null
-    }
+    if (!asset) return null
+
     const alternateUrls = candidates
       .map((candidate) => candidate.url)
       .filter((url) => url !== asset.url)
-    return asset
-      ? {
-          source: "klipy",
-          title: asset.title ?? query,
-          url: asset.url,
-          alternateUrls,
-          previewUrl: asset.previewUrl,
-          hasAudio: true,
-          relevanceScore: asset.relevanceScore,
-        }
-      : null
+    return {
+      source: "pexels",
+      title: query,
+      url: asset.url,
+      alternateUrls,
+      previewUrl: asset.previewUrl,
+      hasAudio: false,
+      relevanceScore: asset.relevanceScore,
+    }
   } catch (error) {
-    await log("klipy", "KLIPY search threw", {
+    await log("pexels", "Pexels search threw", {
       query,
       error: error instanceof Error ? error.message : String(error),
     })
@@ -656,84 +749,108 @@ async function searchKlipy(
   }
 }
 
-function resolveKlipyEndpoint() {
-  const apiKey = process.env.KLIPY_API_KEY ?? ""
-  const configured = process.env.KLIPY_CLIPS_ENDPOINT
-  const baseUrl = process.env.KLIPY_BASE_URL ?? "https://api.klipy.com"
-  const rawEndpoint = configured
-    ? extractUrlFromMaybeCurl(configured)
-    : `${baseUrl}/api/v1/${apiKey}/clips/trending?page=1&per_page=10&customer_id=result-dev&locale=en&content_filter=high`
+function collectPexelsVideoCandidates(
+  json: { videos?: Array<Record<string, unknown>> },
+  query: string
+) {
+  const candidates: VideoCandidate[] = []
 
-  return rawEndpoint
-    .replaceAll("{app_key}", apiKey)
-    .replaceAll("{page}", "1")
-    .replaceAll("{per_page}", "10")
-    .replaceAll("{customer_id}", "result-dev")
-    .replaceAll("{locale}", "en")
-    .replaceAll("{content_filter}", "high")
+  for (const video of json.videos ?? []) {
+    const files = Array.isArray(video.video_files) ? video.video_files : []
+    const pictures = Array.isArray(video.video_pictures)
+      ? video.video_pictures
+      : []
+    const metadataText = metadataTextForCandidate(video)
+    const bestFiles = files
+      .filter((file): file is Record<string, unknown> => {
+        return (
+          Boolean(file) &&
+          typeof file === "object" &&
+          firstVideoString((file as Record<string, unknown>).link) !== null
+        )
+      })
+      .sort((a, b) => pexelsFileScore(b) - pexelsFileScore(a))
+
+    for (const [index, file] of bestFiles.slice(0, 4).entries()) {
+      const url = firstVideoString(file.link)
+      if (!url) continue
+      candidates.push({
+        url,
+        previewUrl:
+          firstString(
+            (pictures[0] as Record<string, unknown> | undefined)?.picture
+          ) ?? undefined,
+        title:
+          firstString(video.url) ?? `Pexels video ${video.id ?? ""}`.trim(),
+        metadataText,
+        relevanceScore:
+          scoreCandidate(query, metadataText) + (index === 0 ? 1 : 0),
+      })
+    }
+  }
+
+  return candidates
+}
+
+function pexelsFileScore(file: Record<string, unknown>) {
+  const width = typeof file.width === "number" ? file.width : 0
+  const height = typeof file.height === "number" ? file.height : 0
+  const quality = firstString(file.quality)
+  const isPortrait = height >= width
+  return (isPortrait ? 10000 : 0) + height + (quality === "hd" ? 500 : 0)
+}
+
+function resolveKlipySearchUrls(query: string) {
+  const apiKey = process.env.KLIPY_API_KEY ?? ""
+  const configured =
+    process.env.KLIPY_CLIPS_SEARCH_ENDPOINT ?? process.env.KLIPY_CLIPS_ENDPOINT
+  const baseUrl = process.env.KLIPY_BASE_URL ?? "https://api.klipy.com"
+  const defaultTemplates = [
+    `${baseUrl}/api/v1/${apiKey}/clips/search?page={page}&per_page={per_page}&customer_id={customer_id}&locale={locale}&content_filter={content_filter}&search={query}`,
+    `${baseUrl}/api/v1/${apiKey}/clips/search?page={page}&per_page={per_page}&customer_id={customer_id}&locale={locale}&content_filter={content_filter}&q={query}`,
+    `${baseUrl}/api/v1/${apiKey}/clips/search?page={page}&per_page={per_page}&customer_id={customer_id}&locale={locale}&content_filter={content_filter}&query={query}`,
+  ]
+  const configuredTemplate = configured
+    ? extractUrlFromMaybeCurl(configured)
+    : null
+  const templates = uniqueUrls([
+    ...(configuredTemplate && !configuredTemplate.includes("/trending")
+      ? [configuredTemplate]
+      : []),
+    ...defaultTemplates,
+  ])
+
+  return templates
+    .filter((template) => !template.includes("/trending"))
+    .map((template) => {
+      const expanded = template
+        .replaceAll("{app_key}", apiKey)
+        .replaceAll("{page}", "1")
+        .replaceAll("{per_page}", "12")
+        .replaceAll("{customer_id}", "result-dev")
+        .replaceAll("{locale}", "en")
+        .replaceAll("{content_filter}", "high")
+        .replaceAll("{search}", encodeURIComponent(query))
+        .replaceAll("{search_term}", encodeURIComponent(query))
+        .replaceAll("{query}", encodeURIComponent(query))
+        .replaceAll("{q}", encodeURIComponent(query))
+      const url = new URL(expanded)
+      if (
+        !url.searchParams.has("q") &&
+        !url.searchParams.has("query") &&
+        !url.searchParams.has("search") &&
+        !url.searchParams.has("search_term")
+      ) {
+        url.searchParams.set("search", query)
+      }
+      url.searchParams.set("per_page", "12")
+      return url
+    })
 }
 
 function extractUrlFromMaybeCurl(value: string) {
   const match = value.match(/https:\/\/[^'"\s]+/)
   return match?.[0] ?? value
-}
-
-async function searchVlipsy(
-  query: string,
-  log: PipelineLogger,
-  usedUrls: Set<string>
-): Promise<ClipAsset | null> {
-  try {
-    const url = `https://vlipsy.com/search/${encodeURIComponent(query)}`
-    await log("vlipsy", "Fetching Vlipsy search page", { query, url })
-    const response = await fetch(url, {
-      headers: { "User-Agent": "result-dev-screening-task" },
-    })
-    await log("vlipsy", "Vlipsy response received", {
-      query,
-      ok: response.ok,
-      status: response.status,
-      statusText: response.statusText,
-    })
-    if (!response.ok) {
-      return null
-    }
-    const html = normalizeEscapedHtml(await response.text())
-    const candidates = collectDirectVideoUrls(html).filter(
-      (url) => !usedUrls.has(url)
-    )
-    const selectedUrl = candidates[0]
-    if (!selectedUrl) {
-      await log("vlipsy", "Vlipsy returned no direct video URL", {
-        query,
-        duplicateCount: collectDirectVideoUrls(html).filter((url) =>
-          usedUrls.has(url)
-        ).length,
-        htmlPreview: html.slice(0, 800),
-      })
-      return null
-    }
-    const asset = {
-      source: "vlipsy",
-      title: query,
-      url: selectedUrl,
-      alternateUrls: candidates.slice(1),
-      hasAudio: true,
-      relevanceScore: 1,
-    } satisfies ClipAsset
-    await log("vlipsy", "Vlipsy asset found", {
-      query,
-      url: asset.url,
-      alternateCount: asset.alternateUrls.length,
-    })
-    return asset
-  } catch (error) {
-    await log("vlipsy", "Vlipsy search threw", {
-      query,
-      error: error instanceof Error ? error.message : String(error),
-    })
-    return null
-  }
 }
 
 async function storeRemoteAsset(
@@ -903,20 +1020,6 @@ function firstString(value: unknown): string | null {
 
 function isVideoUrl(value: string) {
   return /^https:\/\//.test(value) && /\.(mp4|webm|mov)(\?|#|$)/i.test(value)
-}
-
-function normalizeEscapedHtml(value: string) {
-  return value
-    .replace(/\\u002F/g, "/")
-    .replace(/\\\//g, "/")
-    .replace(/&amp;/g, "&")
-}
-
-function collectDirectVideoUrls(value: string) {
-  const matches = value.matchAll(
-    /https:\/\/[^"'<>\\\s]+?\.(?:mp4|webm|mov)(?:\?[^"'<>\\\s]*)?/gi
-  )
-  return uniqueUrls([...matches].map((match) => cleanAssetUrl(match[0])))
 }
 
 function cleanAssetUrl(value: string) {

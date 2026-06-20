@@ -30,6 +30,8 @@ type Env = {
   readonly KLIPY_API_KEY: string | undefined;
   readonly KLIPY_BASE_URL: string | undefined;
   readonly KLIPY_CLIPS_ENDPOINT: string | undefined;
+  readonly KLIPY_CLIPS_SEARCH_ENDPOINT: string | undefined;
+  readonly PEXELS_API_KEY: string | undefined;
 };
 
 /**
