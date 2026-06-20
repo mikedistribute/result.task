@@ -29,6 +29,7 @@ type ClipAsset = {
   source: "klipy" | "vlipsy" | "fallback"
   title: string
   url: string
+  alternateUrls?: string[]
   previewUrl?: string
   hasAudio: boolean
   relevanceScore?: number
@@ -124,12 +125,14 @@ export const processJob = internalAction({
         const foregroundStored = await storeRemoteAsset(
           ctx,
           foreground.url,
+          foreground.alternateUrls ?? [],
           `video_${index + 1}_foreground`,
           log
         )
         const backgroundStored = await storeRemoteAsset(
           ctx,
           background.url,
+          background.alternateUrls ?? [],
           `video_${index + 1}_background`,
           log
         )
@@ -630,11 +633,15 @@ async function searchKlipy(
     if (!asset || shouldRejectAsIrrelevant) {
       return null
     }
+    const alternateUrls = candidates
+      .map((candidate) => candidate.url)
+      .filter((url) => url !== asset.url)
     return asset
       ? {
           source: "klipy",
           title: asset.title ?? query,
           url: asset.url,
+          alternateUrls,
           previewUrl: asset.previewUrl,
           hasAudio: true,
           relevanceScore: asset.relevanceScore,
@@ -691,14 +698,17 @@ async function searchVlipsy(
     if (!response.ok) {
       return null
     }
-    const html = await response.text()
-    const match =
-      html.match(/https:\/\/[^"'<>]+\.mp4[^"'<>]*/i) ??
-      html.match(/https:\/\/[^"'<>]+\.webm[^"'<>]*/i)
-    if (!match || usedUrls.has(match[0])) {
+    const html = normalizeEscapedHtml(await response.text())
+    const candidates = collectDirectVideoUrls(html).filter(
+      (url) => !usedUrls.has(url)
+    )
+    const selectedUrl = candidates[0]
+    if (!selectedUrl) {
       await log("vlipsy", "Vlipsy returned no direct video URL", {
         query,
-        duplicate: match ? usedUrls.has(match[0]) : false,
+        duplicateCount: collectDirectVideoUrls(html).filter((url) =>
+          usedUrls.has(url)
+        ).length,
         htmlPreview: html.slice(0, 800),
       })
       return null
@@ -706,13 +716,15 @@ async function searchVlipsy(
     const asset = {
       source: "vlipsy",
       title: query,
-      url: match[0].replace(/\\u002F/g, "/"),
+      url: selectedUrl,
+      alternateUrls: candidates.slice(1),
       hasAudio: true,
       relevanceScore: 1,
     } satisfies ClipAsset
     await log("vlipsy", "Vlipsy asset found", {
       query,
       url: asset.url,
+      alternateCount: asset.alternateUrls.length,
     })
     return asset
   } catch (error) {
@@ -727,39 +739,82 @@ async function searchVlipsy(
 async function storeRemoteAsset(
   ctx: Pick<ActionCtx, "storage">,
   url: string,
+  alternateUrls: string[],
   label: string,
   log: PipelineLogger
 ) {
-  await log("asset_download", "Downloading remote asset", { label, url })
-  const response = await fetch(url)
-  await log("asset_download", "Remote asset response received", {
-    label,
-    ok: response.ok,
-    status: response.status,
-    statusText: response.statusText,
-    contentType: response.headers.get("content-type"),
-    contentLength: response.headers.get("content-length"),
-  })
-  if (!response.ok) {
-    throw new Error(`Could not download asset ${url}`)
+  const urls = uniqueUrls([url, ...alternateUrls].map(cleanAssetUrl))
+  let lastError = `Could not download asset ${url}`
+
+  for (const [attempt, candidateUrl] of urls.entries()) {
+    try {
+      await log("asset_download", "Downloading remote asset", {
+        label,
+        url: candidateUrl,
+        attempt: attempt + 1,
+        totalAttempts: urls.length,
+      })
+      const response = await fetch(candidateUrl)
+      await log("asset_download", "Remote asset response received", {
+        label,
+        url: candidateUrl,
+        ok: response.ok,
+        status: response.status,
+        statusText: response.statusText,
+        contentType: response.headers.get("content-type"),
+        contentLength: response.headers.get("content-length"),
+      })
+      if (!response.ok) {
+        const bodyPreview = await response.text()
+        lastError = `Could not download asset ${candidateUrl}: ${response.status} ${response.statusText}`
+        await log(
+          "asset_download",
+          "Remote asset rejected; trying next candidate",
+          {
+            label,
+            url: candidateUrl,
+            status: response.status,
+            bodyPreview: bodyPreview.slice(0, 300),
+            hasNextCandidate: attempt < urls.length - 1,
+          }
+        )
+        continue
+      }
+      const blob = await response.blob()
+      await log("asset_download", "Remote asset blob ready", {
+        label,
+        url: candidateUrl,
+        size: blob.size,
+        type: blob.type,
+      })
+      const storageId = await ctx.storage.store(blob)
+      const storedUrl = await ctx.storage.getUrl(storageId)
+      if (!storedUrl) {
+        throw new Error("Could not create Convex asset URL")
+      }
+      await log("asset_download", "Asset stored in Convex storage", {
+        label,
+        sourceUrl: candidateUrl,
+        storageId,
+        storedUrl,
+      })
+      return { storageId, url: storedUrl }
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error)
+      await log(
+        "asset_download",
+        "Remote asset download threw; trying next candidate",
+        {
+          label,
+          url: candidateUrl,
+          error: lastError,
+          hasNextCandidate: attempt < urls.length - 1,
+        }
+      )
+    }
   }
-  const blob = await response.blob()
-  await log("asset_download", "Remote asset blob ready", {
-    label,
-    size: blob.size,
-    type: blob.type,
-  })
-  const storageId = await ctx.storage.store(blob)
-  const storedUrl = await ctx.storage.getUrl(storageId)
-  if (!storedUrl) {
-    throw new Error("Could not create Convex asset URL")
-  }
-  await log("asset_download", "Asset stored in Convex storage", {
-    label,
-    storageId,
-    storedUrl,
-  })
-  return { storageId, url: storedUrl }
+
+  throw new Error(lastError)
 }
 
 function collectVideoCandidates(
@@ -776,8 +831,9 @@ function collectVideoCandidates(
     seen.add(current)
 
     if (typeof current === "string" && isVideoUrl(current)) {
+      const url = cleanAssetUrl(current)
       candidates.push({
-        url: current,
+        url,
         metadataText: "",
         relevanceScore: scoreCandidate(query, ""),
       })
@@ -802,9 +858,10 @@ function collectVideoCandidates(
         firstVideoString(record.src)
 
       if (direct) {
+        const url = cleanAssetUrl(direct)
         const metadataText = metadataTextForCandidate(record)
         candidates.push({
-          url: direct,
+          url,
           previewUrl:
             firstString(record.preview) ??
             firstString(record.thumbnail) ??
@@ -836,7 +893,8 @@ function collectVideoCandidates(
 
 function firstVideoString(value: unknown) {
   const text = firstString(value)
-  return text && isVideoUrl(text) ? text : null
+  const cleaned = text ? cleanAssetUrl(text) : null
+  return cleaned && isVideoUrl(cleaned) ? cleaned : null
 }
 
 function firstString(value: unknown): string | null {
@@ -845,6 +903,32 @@ function firstString(value: unknown): string | null {
 
 function isVideoUrl(value: string) {
   return /^https:\/\//.test(value) && /\.(mp4|webm|mov)(\?|#|$)/i.test(value)
+}
+
+function normalizeEscapedHtml(value: string) {
+  return value
+    .replace(/\\u002F/g, "/")
+    .replace(/\\\//g, "/")
+    .replace(/&amp;/g, "&")
+}
+
+function collectDirectVideoUrls(value: string) {
+  const matches = value.matchAll(
+    /https:\/\/[^"'<>\\\s]+?\.(?:mp4|webm|mov)(?:\?[^"'<>\\\s]*)?/gi
+  )
+  return uniqueUrls([...matches].map((match) => cleanAssetUrl(match[0])))
+}
+
+function cleanAssetUrl(value: string) {
+  return value
+    .replace(/\\u002F/g, "/")
+    .replace(/\\\//g, "/")
+    .replace(/&amp;/g, "&")
+    .replace(/[\\'"),\]}]+$/g, "")
+}
+
+function uniqueUrls(urls: string[]) {
+  return [...new Set(urls.filter(Boolean))]
 }
 
 function metadataTextForCandidate(record: Record<string, unknown>) {
