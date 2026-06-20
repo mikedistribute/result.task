@@ -31,6 +31,15 @@ type ClipAsset = {
   url: string
   previewUrl?: string
   hasAudio: boolean
+  relevanceScore?: number
+}
+
+type VideoCandidate = {
+  url: string
+  previewUrl?: string
+  title?: string
+  metadataText: string
+  relevanceScore: number
 }
 
 type PipelineLogger = (
@@ -80,68 +89,96 @@ export const processJob = internalAction({
       })
 
       const { profile, concepts } = await planVideo(job.prompt, siteText, log)
-      const concept = concepts[0] ?? fallbackConcept(profile)
-      await log("concept", "Selected concept", {
-        caption: concept.caption,
-        jokeAngle: concept.jokeAngle,
-        foregroundQuery: concept.foregroundQuery,
-        backgroundQuery: concept.backgroundQuery,
-        audioMood: concept.audioMood,
-        score: concept.score ?? null,
-      })
-      const foreground = await findForegroundClip(concept.foregroundQuery, log)
-      const background = await findBackgroundClip(concept.backgroundQuery, log)
+      const selectedConcepts = [
+        ...concepts.slice(0, 3),
+        fallbackConcept(profile),
+        fallbackConcept(profile),
+        fallbackConcept(profile),
+      ].slice(0, 3)
+      const usedAssetUrls = new Set<string>()
+      const renderPlans = []
 
-      const foregroundStored = await storeRemoteAsset(
-        ctx,
-        foreground.url,
-        "foreground",
-        log
-      )
-      const backgroundStored = await storeRemoteAsset(
-        ctx,
-        background.url,
-        "background",
-        log
-      )
+      for (const [index, concept] of selectedConcepts.entries()) {
+        await log("concept", "Selected concept", {
+          index,
+          caption: concept.caption,
+          jokeAngle: concept.jokeAngle,
+          foregroundQuery: concept.foregroundQuery,
+          backgroundQuery: concept.backgroundQuery,
+          audioMood: concept.audioMood,
+          score: concept.score ?? null,
+        })
+        const foreground = await findForegroundClip(
+          concept.foregroundQuery,
+          log,
+          usedAssetUrls
+        )
+        usedAssetUrls.add(foreground.url)
+        const background = await findBackgroundClip(
+          concept.backgroundQuery,
+          log,
+          usedAssetUrls
+        )
+        usedAssetUrls.add(background.url)
 
-      const renderPlan = {
-        durationSec: 8,
-        caption: concept.caption,
-        jokeAngle: concept.jokeAngle,
-        foreground: {
-          ...foreground,
-          storageId: foregroundStored.storageId,
-          url: foregroundStored.url,
-          fit: "contain",
-          scale: 0.86,
-          position: "bottom",
-        },
-        background: {
-          ...background,
-          storageId: backgroundStored.storageId,
-          url: backgroundStored.url,
-          fit: "cover",
-        },
-        audio: {
-          useForegroundAudio: foreground.hasAudio,
-          mood: concept.audioMood,
-        },
+        const foregroundStored = await storeRemoteAsset(
+          ctx,
+          foreground.url,
+          `video_${index + 1}_foreground`,
+          log
+        )
+        const backgroundStored = await storeRemoteAsset(
+          ctx,
+          background.url,
+          `video_${index + 1}_background`,
+          log
+        )
+
+        renderPlans.push({
+          durationSec: 8,
+          caption: concept.caption,
+          jokeAngle: concept.jokeAngle,
+          foreground: {
+            ...foreground,
+            storageId: foregroundStored.storageId,
+            url: foregroundStored.url,
+            fit: "contain",
+            scale: 0.86,
+            position: "bottom",
+          },
+          background: {
+            ...background,
+            storageId: backgroundStored.storageId,
+            url: backgroundStored.url,
+            fit: "cover",
+          },
+          audio: {
+            useForegroundAudio: foreground.hasAudio,
+            mood: concept.audioMood,
+          },
+        })
       }
 
       await ctx.runMutation(internal.chat.updatePipelineState, {
         jobId: args.jobId,
         status: "needs_client_render",
         companyProfile: profile,
-        renderPlan,
-        content: `Found the angle: "${concept.caption}" Rendering the video now...`,
+        renderPlan: renderPlans[0],
+        renderPlans,
+        content: `Found ${renderPlans.length} angles. Rendering the videos now...`,
       })
       await log("render_plan", "Render plan ready for browser recorder", {
-        caption: renderPlan.caption,
-        foregroundSource: foreground.source,
-        foregroundTitle: foreground.title,
-        backgroundSource: background.source,
-        backgroundTitle: background.title,
+        count: renderPlans.length,
+        plans: renderPlans.map((plan, index) => ({
+          index,
+          caption: plan.caption,
+          foregroundSource: plan.foreground.source,
+          foregroundTitle: plan.foreground.title,
+          foregroundScore: plan.foreground.relevanceScore ?? null,
+          backgroundSource: plan.background.source,
+          backgroundTitle: plan.background.title,
+          backgroundScore: plan.background.relevanceScore ?? null,
+        })),
       })
     } catch (error) {
       await log("error", "Pipeline failed", {
@@ -479,12 +516,13 @@ For every concept:
 
 async function findForegroundClip(
   query: string,
-  log: PipelineLogger
+  log: PipelineLogger,
+  usedUrls: Set<string>
 ): Promise<ClipAsset> {
   await log("asset_search", "Searching foreground reaction clip", { query })
   const clip =
-    (await searchKlipy(query, log)) ??
-    (await searchVlipsy(query, log)) ??
+    (await searchVlipsy(query, log, usedUrls)) ??
+    (await searchKlipy(query, log, usedUrls)) ??
     fallbackClip(query)
   await log("asset_search", "Foreground clip selected", {
     query,
@@ -498,15 +536,16 @@ async function findForegroundClip(
 
 async function findBackgroundClip(
   query: string,
-  log: PipelineLogger
+  log: PipelineLogger,
+  usedUrls: Set<string>
 ): Promise<ClipAsset> {
   const backgroundQuery = `${query} background`
   await log("asset_search", "Searching background clip", {
     query: backgroundQuery,
   })
   const clip =
-    (await searchKlipy(backgroundQuery, log)) ??
-    (await searchVlipsy(backgroundQuery, log)) ??
+    (await searchVlipsy(backgroundQuery, log, usedUrls)) ??
+    (await searchKlipy(backgroundQuery, log, usedUrls)) ??
     fallbackClip(query)
   await log("asset_search", "Background clip selected", {
     query: backgroundQuery,
@@ -520,7 +559,8 @@ async function findBackgroundClip(
 
 async function searchKlipy(
   query: string,
-  log: PipelineLogger
+  log: PipelineLogger,
+  usedUrls: Set<string>
 ): Promise<ClipAsset | null> {
   const endpoint = resolveKlipyEndpoint()
   const url = new URL(endpoint)
@@ -555,22 +595,41 @@ async function searchKlipy(
       return null
     }
     const json = await response.json()
-    const asset = pickVideoUrl(json)
+    const candidates = collectVideoCandidates(json, query)
+      .filter((candidate) => !usedUrls.has(candidate.url))
+      .sort((a, b) => b.relevanceScore - a.relevanceScore)
+    const asset = candidates[0] ?? null
+    const isTrendingEndpoint = url.pathname.includes("/trending")
+    const shouldRejectAsIrrelevant =
+      isTrendingEndpoint && (!asset || asset.relevanceScore <= 0)
     await log(
       "klipy",
-      asset ? "KLIPY asset found" : "KLIPY returned no video asset",
+      asset && !shouldRejectAsIrrelevant
+        ? "KLIPY asset found"
+        : "KLIPY returned no query-relevant video asset",
       {
         query,
+        endpointType: isTrendingEndpoint ? "trending" : "search",
+        candidateCount: candidates.length,
         asset: asset
           ? {
               title: asset.title ?? null,
               url: asset.url,
               previewUrl: asset.previewUrl ?? null,
+              relevanceScore: asset.relevanceScore,
             }
           : null,
-        responsePreview: sanitizeForLog(json, 1200),
+        topCandidates: candidates.slice(0, 5).map((candidate) => ({
+          title: candidate.title ?? null,
+          url: candidate.url,
+          relevanceScore: candidate.relevanceScore,
+          metadataPreview: candidate.metadataText.slice(0, 180),
+        })),
       }
     )
+    if (!asset || shouldRejectAsIrrelevant) {
+      return null
+    }
     return asset
       ? {
           source: "klipy",
@@ -578,6 +637,7 @@ async function searchKlipy(
           url: asset.url,
           previewUrl: asset.previewUrl,
           hasAudio: true,
+          relevanceScore: asset.relevanceScore,
         }
       : null
   } catch (error) {
@@ -613,7 +673,8 @@ function extractUrlFromMaybeCurl(value: string) {
 
 async function searchVlipsy(
   query: string,
-  log: PipelineLogger
+  log: PipelineLogger,
+  usedUrls: Set<string>
 ): Promise<ClipAsset | null> {
   try {
     const url = `https://vlipsy.com/search/${encodeURIComponent(query)}`
@@ -634,9 +695,10 @@ async function searchVlipsy(
     const match =
       html.match(/https:\/\/[^"'<>]+\.mp4[^"'<>]*/i) ??
       html.match(/https:\/\/[^"'<>]+\.webm[^"'<>]*/i)
-    if (!match) {
+    if (!match || usedUrls.has(match[0])) {
       await log("vlipsy", "Vlipsy returned no direct video URL", {
         query,
+        duplicate: match ? usedUrls.has(match[0]) : false,
         htmlPreview: html.slice(0, 800),
       })
       return null
@@ -646,6 +708,7 @@ async function searchVlipsy(
       title: query,
       url: match[0].replace(/\\u002F/g, "/"),
       hasAudio: true,
+      relevanceScore: 1,
     } satisfies ClipAsset
     await log("vlipsy", "Vlipsy asset found", {
       query,
@@ -699,9 +762,11 @@ async function storeRemoteAsset(
   return { storageId, url: storedUrl }
 }
 
-function pickVideoUrl(
-  value: unknown
-): { url: string; previewUrl?: string; title?: string } | null {
+function collectVideoCandidates(
+  value: unknown,
+  query: string
+): VideoCandidate[] {
+  const candidates: VideoCandidate[] = []
   const queue = [value]
   const seen = new Set<unknown>()
 
@@ -711,7 +776,12 @@ function pickVideoUrl(
     seen.add(current)
 
     if (typeof current === "string" && isVideoUrl(current)) {
-      return { url: current }
+      candidates.push({
+        url: current,
+        metadataText: "",
+        relevanceScore: scoreCandidate(query, ""),
+      })
+      continue
     }
 
     if (Array.isArray(current)) {
@@ -726,10 +796,14 @@ function pickVideoUrl(
         firstVideoString(record.mp4) ??
         firstVideoString(record.webm) ??
         firstVideoString(record.video) ??
-        firstVideoString(record.media_url)
+        firstVideoString(record.media_url) ??
+        firstVideoString(record.mediaUrl) ??
+        firstVideoString(record.file) ??
+        firstVideoString(record.src)
 
       if (direct) {
-        return {
+        const metadataText = metadataTextForCandidate(record)
+        candidates.push({
           url: direct,
           previewUrl:
             firstString(record.preview) ??
@@ -738,12 +812,26 @@ function pickVideoUrl(
             undefined,
           title:
             firstString(record.title) ?? firstString(record.name) ?? undefined,
-        }
+          metadataText,
+          relevanceScore: scoreCandidate(query, metadataText),
+        })
       }
       queue.push(...Object.values(record))
     }
   }
-  return null
+
+  const byUrl = new Map<string, VideoCandidate>()
+  for (const candidate of candidates) {
+    const existing = byUrl.get(candidate.url)
+    if (
+      !existing ||
+      candidate.relevanceScore > existing.relevanceScore ||
+      candidate.metadataText.length > existing.metadataText.length
+    ) {
+      byUrl.set(candidate.url, candidate)
+    }
+  }
+  return [...byUrl.values()]
 }
 
 function firstVideoString(value: unknown) {
@@ -757,6 +845,84 @@ function firstString(value: unknown): string | null {
 
 function isVideoUrl(value: string) {
   return /^https:\/\//.test(value) && /\.(mp4|webm|mov)(\?|#|$)/i.test(value)
+}
+
+function metadataTextForCandidate(record: Record<string, unknown>) {
+  const parts: string[] = []
+  const queue: unknown[] = [record]
+  const seen = new Set<unknown>()
+
+  while (queue.length) {
+    const current = queue.shift()
+    if (!current || seen.has(current)) continue
+    seen.add(current)
+
+    if (typeof current === "string") {
+      if (!isVideoUrl(current) && current.length <= 220) {
+        parts.push(current)
+      }
+      continue
+    }
+
+    if (Array.isArray(current)) {
+      queue.push(...current)
+      continue
+    }
+
+    if (typeof current === "object") {
+      queue.push(...Object.values(current as Record<string, unknown>))
+    }
+  }
+
+  return parts.join(" ").slice(0, 2000)
+}
+
+function scoreCandidate(query: string, metadataText: string) {
+  const queryTokens = tokenizeForSearch(query)
+  const metadata = normalizeForSearch(metadataText)
+  if (!queryTokens.length || !metadata) return 0
+
+  let score = 0
+  for (const token of queryTokens) {
+    if (metadata.includes(token)) score += 1
+  }
+  const phrase = normalizeForSearch(query)
+  if (phrase && metadata.includes(phrase)) score += 4
+  return score
+}
+
+function tokenizeForSearch(value: string) {
+  const stopWords = new Set([
+    "the",
+    "and",
+    "with",
+    "for",
+    "from",
+    "that",
+    "this",
+    "clip",
+    "video",
+    "gif",
+    "background",
+    "reaction",
+    "person",
+    "people",
+    "someone",
+    "guy",
+    "girl",
+    "man",
+    "woman",
+  ])
+  return normalizeForSearch(value)
+    .split(" ")
+    .filter((token) => token.length > 2 && !stopWords.has(token))
+}
+
+function normalizeForSearch(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
 }
 
 function parseJsonBlock(text: string): unknown | null {

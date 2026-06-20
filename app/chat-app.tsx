@@ -6,7 +6,7 @@ import { ArrowUp, Loader2 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
-import { VideoRenderer } from "@/components/video-renderer"
+import { RenderPlan, VideoRenderer } from "@/components/video-renderer"
 import { api } from "@/convex/_generated/api"
 import { Id } from "@/convex/_generated/dataModel"
 import { cn } from "@/lib/utils"
@@ -34,6 +34,8 @@ export function ChatApp() {
     api.chat.getJob,
     displayedJobId ? { jobId: displayedJobId } : "skip"
   )
+  const renderPlans = getRenderPlans(activeJob)
+  const outputVideoUrls = getVideoUrls(activeJob)
   const jobLogs = useQuery(
     api.chat.listJobLogs,
     displayedJobId ? { jobId: displayedJobId } : "skip"
@@ -112,18 +114,43 @@ export function ChatApp() {
             )}
           </div>
 
-          {activeJob?.status === "needs_client_render" &&
-            activeJob.renderPlan && (
+          {activeJob &&
+            ["needs_client_render", "rendering"].includes(activeJob.status) &&
+            renderPlans.length > 0 && (
               <div className="border-t border-black py-3">
-                <div className="flex items-center gap-3 text-xs tracking-[0.14em] text-black/55 uppercase">
-                  <VideoRenderer
-                    jobId={activeJob._id}
-                    plan={activeJob.renderPlan}
-                  />
-                  Rendering
+                <div className="flex flex-wrap items-center gap-3 text-xs tracking-[0.14em] text-black/55 uppercase">
+                  {renderPlans.map((plan, index) => (
+                    <div key={index} className="flex items-center gap-2">
+                      <VideoRenderer
+                        jobId={activeJob._id}
+                        plan={plan}
+                        renderIndex={index}
+                        totalVideos={renderPlans.length}
+                      />
+                      {index + 1}/{renderPlans.length}
+                    </div>
+                  ))}
+                  Rendering videos
                 </div>
               </div>
             )}
+
+          {outputVideoUrls.length > 1 && (
+            <section className="border-t border-black py-3">
+              <div className="grid grid-cols-3 gap-3">
+                {outputVideoUrls.map((url, index) => (
+                  <video
+                    key={url}
+                    className="aspect-[9/16] w-full border border-black bg-black"
+                    src={url}
+                    controls
+                    playsInline
+                    aria-label={`Generated video ${index + 1}`}
+                  />
+                ))}
+              </div>
+            </section>
+          )}
 
           {displayedJobId && (
             <section className="border-t border-black py-3">
@@ -199,4 +226,38 @@ function formatLogData(data: unknown) {
   } catch {
     return String(data)
   }
+}
+
+function getRenderPlans(job: unknown): RenderPlan[] {
+  const record = job as
+    | { renderPlans?: unknown; renderPlan?: unknown }
+    | null
+    | undefined
+  if (Array.isArray(record?.renderPlans)) {
+    return record.renderPlans.filter(isRenderPlan)
+  }
+  return isRenderPlan(record?.renderPlan) ? [record.renderPlan] : []
+}
+
+function getVideoUrls(job: unknown) {
+  const record = job as
+    | { videoUrls?: unknown; videoUrl?: unknown }
+    | null
+    | undefined
+  if (Array.isArray(record?.videoUrls)) {
+    return record.videoUrls.filter(
+      (url): url is string => typeof url === "string"
+    )
+  }
+  return typeof record?.videoUrl === "string" ? [record.videoUrl] : []
+}
+
+function isRenderPlan(value: unknown): value is RenderPlan {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    "caption" in value &&
+    "foreground" in value &&
+    "background" in value
+  )
 }

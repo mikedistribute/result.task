@@ -42,7 +42,20 @@ export const getJob = query({
       ? await ctx.storage.getUrl(job.videoStorageId)
       : (job.videoUrl ?? null)
 
-    return { ...job, videoUrl }
+    const videoUrls =
+      job.videoStorageIds && job.videoStorageIds.length > 0
+        ? await Promise.all(
+            job.videoStorageIds.map(async (storageId) => {
+              return await ctx.storage.getUrl(storageId)
+            })
+          )
+        : (job.videoUrls ?? [])
+
+    return {
+      ...job,
+      videoUrl,
+      videoUrls: videoUrls.filter((url): url is string => Boolean(url)),
+    }
   },
 })
 
@@ -98,7 +111,13 @@ export const markClientRendering = mutation({
   args: { jobId: v.id("jobs") },
   handler: async (ctx, args) => {
     const job = await ctx.db.get(args.jobId)
-    if (!job || job.status !== "needs_client_render") {
+    if (
+      !job ||
+      (job.status !== "needs_client_render" && job.status !== "rendering")
+    ) {
+      return null
+    }
+    if (job.status === "rendering") {
       return null
     }
     await ctx.db.patch(args.jobId, {
@@ -124,6 +143,8 @@ export const finishClientRender = mutation({
   args: {
     jobId: v.id("jobs"),
     storageId: v.id("_storage"),
+    renderIndex: v.optional(v.number()),
+    totalVideos: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const job = await ctx.db.get(args.jobId)
@@ -131,20 +152,34 @@ export const finishClientRender = mutation({
       throw new Error("Job not found")
     }
     const videoUrl = await ctx.storage.getUrl(args.storageId)
-    const content = videoUrl
-      ? `Done. Here's the assembled UGC video: ${videoUrl}`
-      : "Done. The video was uploaded to Convex storage."
+    const totalVideos = args.totalVideos ?? 1
+    const renderIndex = args.renderIndex ?? 0
+    const videoStorageIds = [...(job.videoStorageIds ?? [])]
+    const videoUrls = [...(job.videoUrls ?? [])]
+    videoStorageIds[renderIndex] = args.storageId
+    if (videoUrl) {
+      videoUrls[renderIndex] = videoUrl
+    }
+    const completedUrls = videoUrls.filter(Boolean)
+    const isComplete = completedUrls.length >= totalVideos
+    const content = isComplete
+      ? `Done. Here are the 3 assembled UGC videos:\n${completedUrls
+          .map((url, index) => `${index + 1}. ${url}`)
+          .join("\n")}`
+      : `Rendered video ${completedUrls.length}/${totalVideos}...`
 
     await ctx.db.patch(args.jobId, {
-      status: "complete",
-      videoStorageId: args.storageId,
+      status: isComplete ? "complete" : "rendering",
+      videoStorageId: videoStorageIds[0],
+      videoStorageIds,
       videoUrl: videoUrl ?? undefined,
+      videoUrls,
       updatedAt: Date.now(),
     })
     await ctx.db.patch(job.assistantMessageId, {
-      status: "complete",
+      status: isComplete ? "complete" : "rendering",
       content,
-      videoUrl: videoUrl ?? undefined,
+      videoUrl: videoUrls[0],
     })
     return { videoUrl }
   },
@@ -180,6 +215,7 @@ export const updatePipelineState = internalMutation({
     content: v.optional(v.string()),
     companyProfile: v.optional(v.any()),
     renderPlan: v.optional(v.any()),
+    renderPlans: v.optional(v.any()),
     error: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
@@ -193,6 +229,7 @@ export const updatePipelineState = internalMutation({
       updatedAt: number
       companyProfile?: unknown
       renderPlan?: unknown
+      renderPlans?: unknown
       error?: string
     } = {
       status: args.status,
@@ -204,6 +241,9 @@ export const updatePipelineState = internalMutation({
     }
     if (args.renderPlan !== undefined) {
       patch.renderPlan = args.renderPlan
+    }
+    if (args.renderPlans !== undefined) {
+      patch.renderPlans = args.renderPlans
     }
     if (args.error !== undefined) {
       patch.error = args.error
