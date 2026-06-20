@@ -30,7 +30,7 @@ task. The chat message creates a Convex job that:
 1. extracts the product URL from the prompt,
 2. scrapes the site with Firecrawl,
 3. asks Claude for a product profile plus meme concepts,
-4. searches KLIPY for foreground/reaction clips and Pexels for background videos,
+4. searches KLIPY for foreground/reaction clips and Pexels for background photos,
 5. stores chosen remote assets in Convex storage,
 6. records the final 9:16 WebM in the browser,
 7. uploads the final video to Convex storage and posts the URL back to chat.
@@ -54,4 +54,4 @@ npx convex env set KLIPY_CLIPS_SEARCH_ENDPOINT "https://api.klipy.com/api/v1/{ap
 ```
 
 No background remover or AI video generation is used; foreground media comes
-from KLIPY clip search and backgrounds come from Pexels video search.
+from KLIPY clip search and backgrounds come from Pexels photo search.

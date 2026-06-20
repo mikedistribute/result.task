@@ -27,6 +27,7 @@ type MemeConcept = {
 
 type ClipAsset = {
   source: "klipy" | "pexels" | "vlipsy" | "fallback"
+  mediaType: "video" | "image"
   title: string
   url: string
   alternateUrls?: string[]
@@ -153,6 +154,7 @@ export const processJob = internalAction({
             ...background,
             storageId: backgroundStored.storageId,
             url: backgroundStored.url,
+            mediaType: background.mediaType,
             fit: "cover",
           },
           audio: {
@@ -541,9 +543,10 @@ async function findBackgroundClip(
   log: PipelineLogger,
   usedUrls: Set<string>
 ): Promise<ClipAsset> {
-  await log("asset_search", "Searching Pexels background video", { query })
+  await log("asset_search", "Searching Pexels background photo", { query })
   const clip =
-    (await searchPexelsBackground(query, log, usedUrls)) ?? fallbackClip(query)
+    (await searchPexelsBackgroundPhoto(query, log, usedUrls)) ??
+    fallbackClip(query)
   await log("asset_search", "Background clip selected", {
     query,
     source: clip.source,
@@ -633,6 +636,7 @@ async function searchKlipy(
         .filter((url) => url !== asset.url)
       return {
         source: "klipy",
+        mediaType: "video",
         title: asset.title ?? query,
         url: asset.url,
         alternateUrls,
@@ -652,28 +656,32 @@ async function searchKlipy(
   return null
 }
 
-async function searchPexelsBackground(
+async function searchPexelsBackgroundPhoto(
   query: string,
   log: PipelineLogger,
   usedUrls: Set<string>
 ): Promise<ClipAsset | null> {
   const apiKey = process.env.PEXELS_API_KEY
   if (!apiKey) {
-    await log("pexels", "Missing PEXELS_API_KEY; skipping Pexels background", {
-      query,
-    })
+    await log(
+      "pexels",
+      "Missing PEXELS_API_KEY; skipping Pexels background photo",
+      {
+        query,
+      }
+    )
     return null
   }
 
-  const url = new URL("https://api.pexels.com/v1/videos/search")
+  const url = new URL("https://api.pexels.com/v1/search")
   url.searchParams.set("query", query)
   url.searchParams.set("orientation", "portrait")
-  url.searchParams.set("size", "medium")
+  url.searchParams.set("size", "large")
   url.searchParams.set("per_page", "12")
   url.searchParams.set("page", "1")
 
   try {
-    await log("pexels", "Calling Pexels video search", {
+    await log("pexels", "Calling Pexels photo search", {
       query,
       endpoint: redactUrl(url.toString()),
     })
@@ -696,17 +704,17 @@ async function searchPexelsBackground(
     }
 
     const json = (await response.json()) as {
-      videos?: Array<Record<string, unknown>>
+      photos?: Array<Record<string, unknown>>
     }
-    const candidates = collectPexelsVideoCandidates(json, query)
+    const candidates = collectPexelsPhotoCandidates(json, query)
       .filter((candidate) => !usedUrls.has(candidate.url))
       .sort((a, b) => b.relevanceScore - a.relevanceScore)
     const asset = candidates[0] ?? null
     await log(
       "pexels",
       asset
-        ? "Pexels background asset found"
-        : "Pexels returned no video asset",
+        ? "Pexels background photo found"
+        : "Pexels returned no photo asset",
       {
         query,
         candidateCount: candidates.length,
@@ -733,6 +741,7 @@ async function searchPexelsBackground(
       .filter((url) => url !== asset.url)
     return {
       source: "pexels",
+      mediaType: "image",
       title: query,
       url: asset.url,
       alternateUrls,
@@ -741,7 +750,7 @@ async function searchPexelsBackground(
       relevanceScore: asset.relevanceScore,
     }
   } catch (error) {
-    await log("pexels", "Pexels search threw", {
+    await log("pexels", "Pexels photo search threw", {
       query,
       error: error instanceof Error ? error.message : String(error),
     })
@@ -749,39 +758,39 @@ async function searchPexelsBackground(
   }
 }
 
-function collectPexelsVideoCandidates(
-  json: { videos?: Array<Record<string, unknown>> },
+function collectPexelsPhotoCandidates(
+  json: { photos?: Array<Record<string, unknown>> },
   query: string
 ) {
   const candidates: VideoCandidate[] = []
 
-  for (const video of json.videos ?? []) {
-    const files = Array.isArray(video.video_files) ? video.video_files : []
-    const pictures = Array.isArray(video.video_pictures)
-      ? video.video_pictures
-      : []
-    const metadataText = metadataTextForCandidate(video)
-    const bestFiles = files
-      .filter((file): file is Record<string, unknown> => {
-        return (
-          Boolean(file) &&
-          typeof file === "object" &&
-          firstVideoString((file as Record<string, unknown>).link) !== null
-        )
-      })
-      .sort((a, b) => pexelsFileScore(b) - pexelsFileScore(a))
+  for (const photo of json.photos ?? []) {
+    const src =
+      photo.src && typeof photo.src === "object"
+        ? (photo.src as Record<string, unknown>)
+        : {}
+    const metadataText = metadataTextForCandidate(photo)
+    const urls = [
+      firstImageString(src.portrait),
+      firstImageString(src.large2x),
+      firstImageString(src.large),
+      firstImageString(src.original),
+    ].filter((url): url is string => Boolean(url))
+    const primaryUrl = urls[0]
+    if (!primaryUrl) continue
 
-    for (const [index, file] of bestFiles.slice(0, 4).entries()) {
-      const url = firstVideoString(file.link)
-      if (!url) continue
+    for (const [index, url] of uniqueUrls(urls).entries()) {
       candidates.push({
         url,
         previewUrl:
-          firstString(
-            (pictures[0] as Record<string, unknown> | undefined)?.picture
-          ) ?? undefined,
+          firstImageString(src.medium) ??
+          firstImageString(src.small) ??
+          firstImageString(src.tiny) ??
+          undefined,
         title:
-          firstString(video.url) ?? `Pexels video ${video.id ?? ""}`.trim(),
+          firstString(photo.alt) ??
+          firstString(photo.url) ??
+          `Pexels photo ${photo.id ?? ""}`.trim(),
         metadataText,
         relevanceScore:
           scoreCandidate(query, metadataText) + (index === 0 ? 1 : 0),
@@ -790,14 +799,6 @@ function collectPexelsVideoCandidates(
   }
 
   return candidates
-}
-
-function pexelsFileScore(file: Record<string, unknown>) {
-  const width = typeof file.width === "number" ? file.width : 0
-  const height = typeof file.height === "number" ? file.height : 0
-  const quality = firstString(file.quality)
-  const isPortrait = height >= width
-  return (isPortrait ? 10000 : 0) + height + (quality === "hd" ? 500 : 0)
 }
 
 function resolveKlipySearchUrls(query: string) {
@@ -1014,12 +1015,24 @@ function firstVideoString(value: unknown) {
   return cleaned && isVideoUrl(cleaned) ? cleaned : null
 }
 
+function firstImageString(value: unknown) {
+  const text = firstString(value)
+  const cleaned = text ? cleanAssetUrl(text) : null
+  return cleaned && isImageUrl(cleaned) ? cleaned : null
+}
+
 function firstString(value: unknown): string | null {
   return typeof value === "string" ? value : null
 }
 
 function isVideoUrl(value: string) {
   return /^https:\/\//.test(value) && /\.(mp4|webm|mov)(\?|#|$)/i.test(value)
+}
+
+function isImageUrl(value: string) {
+  return (
+    /^https:\/\//.test(value) && /\.(jpe?g|png|webp|avif)(\?|#|$)/i.test(value)
+  )
 }
 
 function cleanAssetUrl(value: string) {

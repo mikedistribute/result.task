@@ -16,6 +16,7 @@ export type RenderPlan = {
   }
   background: {
     url: string
+    mediaType?: "video" | "image"
   }
   audio?: {
     useForegroundAudio?: boolean
@@ -106,21 +107,17 @@ async function renderPlanToWebm(
   const context = canvas.getContext("2d")
   if (!context) throw new Error("Canvas context unavailable")
 
-  const background = await loadVideo(plan.background.url)
+  const background = await loadBackground(plan.background)
   const foreground = await loadVideo(plan.foreground.url)
   const shouldUseForegroundAudio = plan.audio?.useForegroundAudio ?? true
-  background.muted = true
-  background.loop = true
   foreground.muted = !shouldUseForegroundAudio
   foreground.loop = true
 
-  await Promise.all([
-    playMedia(background),
-    playMedia(foreground).catch(async () => {
-      foreground.muted = true
-      await playMedia(foreground)
-    }),
-  ])
+  await playBackground(background)
+  await playMedia(foreground).catch(async () => {
+    foreground.muted = true
+    await playMedia(foreground)
+  })
 
   const stream = canvas.captureStream(30)
   if (shouldUseForegroundAudio) {
@@ -169,7 +166,9 @@ async function renderPlanToWebm(
     }, durationMs + 200)
   })
 
-  background.pause()
+  if (background instanceof HTMLVideoElement) {
+    background.pause()
+  }
   foreground.pause()
   for (const track of stream.getTracks()) {
     track.stop()
@@ -181,7 +180,7 @@ async function renderPlanToWebm(
 function drawFrame(
   context: CanvasRenderingContext2D,
   canvas: HTMLCanvasElement,
-  background: HTMLVideoElement,
+  background: HTMLVideoElement | HTMLImageElement,
   foreground: HTMLVideoElement,
   plan: RenderPlan,
   progress: number
@@ -210,26 +209,30 @@ function drawFrame(
 
 function drawCover(
   context: CanvasRenderingContext2D,
-  video: HTMLVideoElement,
+  media: HTMLVideoElement | HTMLImageElement,
   width: number,
   height: number
 ) {
-  const videoAspect = video.videoWidth / video.videoHeight || 9 / 16
+  const mediaWidth =
+    media instanceof HTMLVideoElement ? media.videoWidth : media.naturalWidth
+  const mediaHeight =
+    media instanceof HTMLVideoElement ? media.videoHeight : media.naturalHeight
+  const mediaAspect = mediaWidth / mediaHeight || 9 / 16
   const canvasAspect = width / height
   let sx = 0
   let sy = 0
-  let sw = video.videoWidth
-  let sh = video.videoHeight
+  let sw = mediaWidth
+  let sh = mediaHeight
 
-  if (videoAspect > canvasAspect) {
-    sw = video.videoHeight * canvasAspect
-    sx = (video.videoWidth - sw) / 2
+  if (mediaAspect > canvasAspect) {
+    sw = mediaHeight * canvasAspect
+    sx = (mediaWidth - sw) / 2
   } else {
-    sh = video.videoWidth / canvasAspect
-    sy = (video.videoHeight - sh) / 2
+    sh = mediaWidth / canvasAspect
+    sy = (mediaHeight - sh) / 2
   }
 
-  context.drawImage(video, sx, sy, sw, sh, 0, 0, width, height)
+  context.drawImage(media, sx, sy, sw, sh, 0, 0, width, height)
   context.fillStyle = "rgba(0, 0, 0, 0.12)"
   context.fillRect(0, 0, width, height)
 }
@@ -290,6 +293,33 @@ async function loadVideo(src: string) {
       reject(new Error(`Could not load video asset: ${src}`))
   })
   return video
+}
+
+async function loadBackground(background: RenderPlan["background"]) {
+  if (background.mediaType === "image") {
+    return await loadImage(background.url)
+  }
+  return await loadVideo(background.url)
+}
+
+async function loadImage(src: string) {
+  const image = new Image()
+  image.crossOrigin = "anonymous"
+  image.src = src
+  await new Promise<void>((resolve, reject) => {
+    image.onload = () => resolve()
+    image.onerror = () =>
+      reject(new Error(`Could not load image asset: ${src}`))
+  })
+  return image
+}
+
+async function playBackground(background: HTMLVideoElement | HTMLImageElement) {
+  if (background instanceof HTMLVideoElement) {
+    background.muted = true
+    background.loop = true
+    await playMedia(background)
+  }
 }
 
 async function playMedia(video: HTMLVideoElement) {
