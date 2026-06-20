@@ -40,6 +40,15 @@ export default defineSchema({
     renderPlan: v.optional(v.any()),
     renderPlans: v.optional(v.any()),
     videoStorageId: v.optional(v.id("_storage")),
+    videoRenders: v.optional(
+      v.array(
+        v.object({
+          index: v.number(),
+          storageId: v.id("_storage"),
+          url: v.optional(v.string()),
+        })
+      )
+    ),
     videoStorageIds: v.optional(v.array(v.id("_storage"))),
     videoUrl: v.optional(v.string()),
     videoUrls: v.optional(v.array(v.string())),

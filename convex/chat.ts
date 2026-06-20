@@ -43,13 +43,17 @@ export const getJob = query({
       : (job.videoUrl ?? null)
 
     const videoUrls =
-      job.videoStorageIds && job.videoStorageIds.length > 0
-        ? await Promise.all(
-            job.videoStorageIds.map(async (storageId) => {
-              return await ctx.storage.getUrl(storageId)
-            })
-          )
-        : (job.videoUrls ?? [])
+      job.videoRenders && job.videoRenders.length > 0
+        ? job.videoRenders
+            .sort((a, b) => a.index - b.index)
+            .map((render) => render.url)
+        : job.videoStorageIds && job.videoStorageIds.length > 0
+          ? await Promise.all(
+              job.videoStorageIds.map(async (storageId) => {
+                return await ctx.storage.getUrl(storageId)
+              })
+            )
+          : (job.videoUrls ?? [])
 
     return {
       ...job,
@@ -154,14 +158,20 @@ export const finishClientRender = mutation({
     const videoUrl = await ctx.storage.getUrl(args.storageId)
     const totalVideos = args.totalVideos ?? 1
     const renderIndex = args.renderIndex ?? 0
-    const videoStorageIds = [...(job.videoStorageIds ?? [])]
-    const videoUrls = [...(job.videoUrls ?? [])]
-    videoStorageIds[renderIndex] = args.storageId
-    if (videoUrl) {
-      videoUrls[renderIndex] = videoUrl
-    }
-    const completedUrls = videoUrls.filter(Boolean)
-    const isComplete = completedUrls.length >= totalVideos
+    const existingRenders = job.videoRenders ?? []
+    const videoRenders = [
+      ...existingRenders.filter((render) => render.index !== renderIndex),
+      {
+        index: renderIndex,
+        storageId: args.storageId,
+        url: videoUrl ?? undefined,
+      },
+    ].sort((a, b) => a.index - b.index)
+    const completedUrls = videoRenders
+      .map((render) => render.url)
+      .filter((url): url is string => Boolean(url))
+    const completedStorageIds = videoRenders.map((render) => render.storageId)
+    const isComplete = videoRenders.length >= totalVideos
     const content = isComplete
       ? `Done. Here are the 3 assembled UGC videos:\n${completedUrls
           .map((url, index) => `${index + 1}. ${url}`)
@@ -170,16 +180,17 @@ export const finishClientRender = mutation({
 
     await ctx.db.patch(args.jobId, {
       status: isComplete ? "complete" : "rendering",
-      videoStorageId: videoStorageIds[0],
-      videoStorageIds,
-      videoUrl: videoUrl ?? undefined,
-      videoUrls,
+      videoStorageId: videoRenders[0]?.storageId,
+      videoStorageIds: completedStorageIds,
+      videoRenders,
+      videoUrl: videoRenders[0]?.url,
+      videoUrls: completedUrls,
       updatedAt: Date.now(),
     })
     await ctx.db.patch(job.assistantMessageId, {
       status: isComplete ? "complete" : "rendering",
       content,
-      videoUrl: videoUrls[0],
+      videoUrl: completedUrls[0],
     })
     return { videoUrl }
   },
