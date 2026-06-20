@@ -1,12 +1,12 @@
-import { v } from "convex/values";
-import { internal } from "./_generated/api";
-import { Id } from "./_generated/dataModel";
+import { v } from "convex/values"
+import { internal } from "./_generated/api"
+import { Id } from "./_generated/dataModel"
 import {
   internalMutation,
   internalQuery,
   mutation,
   query,
-} from "./_generated/server";
+} from "./_generated/server"
 
 const jobStatus = v.union(
   v.literal("queued"),
@@ -15,8 +15,8 @@ const jobStatus = v.union(
   v.literal("needs_client_render"),
   v.literal("rendering"),
   v.literal("complete"),
-  v.literal("failed"),
-);
+  v.literal("failed")
+)
 
 export const listMessages = query({
   args: { sessionId: v.string() },
@@ -24,27 +24,38 @@ export const listMessages = query({
     return await ctx.db
       .query("messages")
       .withIndex("by_sessionId_and_createdAt", (q) =>
-        q.eq("sessionId", args.sessionId),
+        q.eq("sessionId", args.sessionId)
       )
       .order("asc")
-      .take(100);
+      .take(100)
   },
-});
+})
 
 export const getJob = query({
   args: { jobId: v.id("jobs") },
   handler: async (ctx, args) => {
-    const job = await ctx.db.get(args.jobId);
+    const job = await ctx.db.get(args.jobId)
     if (!job) {
-      return null;
+      return null
     }
     const videoUrl = job.videoStorageId
       ? await ctx.storage.getUrl(job.videoStorageId)
-      : job.videoUrl ?? null;
+      : (job.videoUrl ?? null)
 
-    return { ...job, videoUrl };
+    return { ...job, videoUrl }
   },
-});
+})
+
+export const listJobLogs = query({
+  args: { jobId: v.id("jobs") },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("pipelineLogs")
+      .withIndex("by_jobId_and_createdAt", (q) => q.eq("jobId", args.jobId))
+      .order("asc")
+      .take(200)
+  },
+})
 
 export const sendMessage = mutation({
   args: {
@@ -52,20 +63,20 @@ export const sendMessage = mutation({
     content: v.string(),
   },
   handler: async (ctx, args) => {
-    const now = Date.now();
+    const now = Date.now()
     const userMessageId = await ctx.db.insert("messages", {
       sessionId: args.sessionId,
       role: "user",
       content: args.content,
       createdAt: now,
-    });
+    })
     const assistantMessageId = await ctx.db.insert("messages", {
       sessionId: args.sessionId,
       role: "assistant",
       content: "Researching the product and picking clips...",
       status: "queued",
       createdAt: now + 1,
-    });
+    })
     const jobId = await ctx.db.insert("jobs", {
       sessionId: args.sessionId,
       prompt: args.content,
@@ -74,40 +85,40 @@ export const sendMessage = mutation({
       status: "queued",
       createdAt: now,
       updatedAt: now,
-    });
+    })
 
-    await ctx.db.patch(assistantMessageId, { jobId });
-    await ctx.scheduler.runAfter(0, internal.pipeline.processJob, { jobId });
+    await ctx.db.patch(assistantMessageId, { jobId })
+    await ctx.scheduler.runAfter(0, internal.pipeline.processJob, { jobId })
 
-    return { jobId };
+    return { jobId }
   },
-});
+})
 
 export const markClientRendering = mutation({
   args: { jobId: v.id("jobs") },
   handler: async (ctx, args) => {
-    const job = await ctx.db.get(args.jobId);
+    const job = await ctx.db.get(args.jobId)
     if (!job || job.status !== "needs_client_render") {
-      return null;
+      return null
     }
     await ctx.db.patch(args.jobId, {
       status: "rendering",
       updatedAt: Date.now(),
-    });
+    })
     await ctx.db.patch(job.assistantMessageId, {
       status: "rendering",
       content: "Compositing the clip in your browser...",
-    });
-    return null;
+    })
+    return null
   },
-});
+})
 
 export const generateVideoUploadUrl = mutation({
   args: {},
   handler: async (ctx) => {
-    return await ctx.storage.generateUploadUrl();
+    return await ctx.storage.generateUploadUrl()
   },
-});
+})
 
 export const finishClientRender = mutation({
   args: {
@@ -115,29 +126,29 @@ export const finishClientRender = mutation({
     storageId: v.id("_storage"),
   },
   handler: async (ctx, args) => {
-    const job = await ctx.db.get(args.jobId);
+    const job = await ctx.db.get(args.jobId)
     if (!job) {
-      throw new Error("Job not found");
+      throw new Error("Job not found")
     }
-    const videoUrl = await ctx.storage.getUrl(args.storageId);
+    const videoUrl = await ctx.storage.getUrl(args.storageId)
     const content = videoUrl
       ? `Done. Here's the assembled UGC video: ${videoUrl}`
-      : "Done. The video was uploaded to Convex storage.";
+      : "Done. The video was uploaded to Convex storage."
 
     await ctx.db.patch(args.jobId, {
       status: "complete",
       videoStorageId: args.storageId,
       videoUrl: videoUrl ?? undefined,
       updatedAt: Date.now(),
-    });
+    })
     await ctx.db.patch(job.assistantMessageId, {
       status: "complete",
       content,
       videoUrl: videoUrl ?? undefined,
-    });
-    return { videoUrl };
+    })
+    return { videoUrl }
   },
-});
+})
 
 export const failClientRender = mutation({
   args: {
@@ -145,22 +156,22 @@ export const failClientRender = mutation({
     error: v.string(),
   },
   handler: async (ctx, args) => {
-    const job = await ctx.db.get(args.jobId);
+    const job = await ctx.db.get(args.jobId)
     if (!job) {
-      return null;
+      return null
     }
     await ctx.db.patch(args.jobId, {
       status: "failed",
       error: args.error,
       updatedAt: Date.now(),
-    });
+    })
     await ctx.db.patch(job.assistantMessageId, {
       status: "failed",
       content: `I found a video concept, but rendering failed: ${args.error}`,
-    });
-    return null;
+    })
+    return null
   },
-});
+})
 
 export const updatePipelineState = internalMutation({
   args: {
@@ -172,55 +183,74 @@ export const updatePipelineState = internalMutation({
     error: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const job = await ctx.db.get(args.jobId);
+    const job = await ctx.db.get(args.jobId)
     if (!job) {
-      return null;
+      return null
     }
 
     const patch: {
-      status: typeof args.status;
-      updatedAt: number;
-      companyProfile?: unknown;
-      renderPlan?: unknown;
-      error?: string;
+      status: typeof args.status
+      updatedAt: number
+      companyProfile?: unknown
+      renderPlan?: unknown
+      error?: string
     } = {
       status: args.status,
       updatedAt: Date.now(),
-    };
+    }
 
     if (args.companyProfile !== undefined) {
-      patch.companyProfile = args.companyProfile;
+      patch.companyProfile = args.companyProfile
     }
     if (args.renderPlan !== undefined) {
-      patch.renderPlan = args.renderPlan;
+      patch.renderPlan = args.renderPlan
     }
     if (args.error !== undefined) {
-      patch.error = args.error;
+      patch.error = args.error
     }
 
-    await ctx.db.patch(args.jobId, patch);
+    await ctx.db.patch(args.jobId, patch)
     await ctx.db.patch(job.assistantMessageId, {
       status: args.status,
       content: args.content ?? statusCopy(args.status),
-    });
+    })
 
-    return null;
+    return null
   },
-});
+})
+
+export const addJobLog = internalMutation({
+  args: {
+    jobId: v.id("jobs"),
+    step: v.string(),
+    message: v.string(),
+    data: v.optional(v.any()),
+  },
+  handler: async (ctx, args) => {
+    await ctx.db.insert("pipelineLogs", {
+      jobId: args.jobId,
+      step: args.step,
+      message: args.message,
+      data: args.data,
+      createdAt: Date.now(),
+    })
+    return null
+  },
+})
 
 export const getJobForPipeline = internalQuery({
   args: { jobId: v.id("jobs") },
   handler: async (ctx, args) => {
-    return await ctx.db.get(args.jobId);
+    return await ctx.db.get(args.jobId)
   },
-});
+})
 
 function statusCopy(status: string) {
-  if (status === "researching") return "Reading the product site...";
-  if (status === "planning") return "Writing meme concepts and finding clips...";
-  if (status === "needs_client_render") return "Assets picked. Rendering now...";
-  if (status === "failed") return "Something failed while assembling the video.";
-  return "Working on it...";
+  if (status === "researching") return "Reading the product site..."
+  if (status === "planning") return "Writing meme concepts and finding clips..."
+  if (status === "needs_client_render") return "Assets picked. Rendering now..."
+  if (status === "failed") return "Something failed while assembling the video."
+  return "Working on it..."
 }
 
-export type JobId = Id<"jobs">;
+export type JobId = Id<"jobs">
